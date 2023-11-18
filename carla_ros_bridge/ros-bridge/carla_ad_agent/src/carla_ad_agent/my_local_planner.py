@@ -257,7 +257,6 @@ class MyLocalPlanner(object):
         Execute one step of local planning which involves running the longitudinal
         and lateral PID controllers to follow the waypoints trajectory.
         """
-
         if not self._waypoint_buffer and not self._waypoints_queue:
             control = CarlaEgoVehicleControl()
             control.steer = 0.0
@@ -269,7 +268,7 @@ class MyLocalPlanner(object):
             rospy.loginfo("Route finished.")
             return control, True
 
-        # Buffering the waypoints
+        #   Buffering the waypoints
         if not self._waypoint_buffer:
             for i in range(self._buffer_size):
                 if self._waypoints_queue:
@@ -278,80 +277,53 @@ class MyLocalPlanner(object):
                 else:
                     break
 
+        # current vehicle waypoint
         self._current_waypoint = self.get_waypoint(current_pose.position)
 
+        # get a list of obstacles surrounding the ego vehicle
         self.get_obstacles(current_pose.position, 70.0)
 
-        safety_distance = 10.0
-        min_steering_angle = -0.5
-        max_steering_angle = 0.5
-        num_steps = 10
+        # # Example 1: get two waypoints on the left and right lane marking w.r.t current pose
+        left, right = self.get_coordinate_lanemarking(current_pose.position)
+        print("\x1b[6;30;33m------Example 1------\x1b[0m")
+        print("Left: {}, {}; right: {}, {}".format(left.x, left.y, right.x, right.y))
+        
+        # # Example 2: check obstacle collision
+        # print("\x1b[6;30;33m------Example 2------\x1b[0m")
+        # point = Point()
+        # point.x = 100.0
+        # point.y = 100.0
+        # point.z = 1.5
+        # for ob in self._obstacles:
+        #     print("id: {}, collision: {}".format(ob.id, self.check_obstacle(point, ob)))
+        
+        # target waypoint
+        self.target_route_point = self._waypoint_buffer[0]
 
-        safest_steering = 0.0
-        min_rule_violation = float('inf')
+        target_point = PointStamped()
+        target_point.header.frame_id = "map"
+        target_point.point.x = self.target_route_point.position.x
+        target_point.point.y = self.target_route_point.position.y
+        target_point.point.z = self.target_route_point.position.z
+        self._target_point_publisher.publish(target_point)
+        
+        # move using PID controllers
+        control = self._vehicle_controller.run_step(
+            target_speed, current_speed, current_pose, self.target_route_point)
+        
+        
+        # purge the queue of obsolete waypoints
+        max_index = -1
 
-        for i in range(num_steps):
-            desired_steering = min_steering_angle + i * (max_steering_angle - min_steering_angle) / (num_steps - 1)
+        sampling_radius = target_speed * 1 / 3.6  # 1 seconds horizon
+        min_distance = sampling_radius * self.MIN_DISTANCE_PERCENTAGE
 
-            if desired_steering > 0.5:
-                desired_steering = 0.5
-            elif desired_steering < -0.5:
-                desired_steering = -0.5
-
-            rule_violation = self.check_rules_violation(desired_steering, current_pose)
-
-            if rule_violation < min_rule_violation:
-                safest_steering = desired_steering
-                min_rule_violation = rule_violation
-
-        control = CarlaEgoVehicleControl()
-        control.steer = safest_steering
-
-        if min_rule_violation == float('inf'):
-            rospy.loginfo("No safe maneuver found! Stopping the vehicle.")
-            control.throttle = 0.0
-            control.brake = 1.0
-            return control, False
+        for i, route_point in enumerate(self._waypoint_buffer):
+            if distance_vehicle(
+                    route_point, current_pose.position) < min_distance:
+                max_index = i
+        if max_index >= 0:
+            for i in range(max_index + 1):
+                self._waypoint_buffer.popleft()
 
         return control, False
-    
-    # Inside the MyLocalPlanner class
-
-    def check_rules_violation(self, desired_steering, current_pose):
-        """
-        Check if the proposed steering angle violates any rules or constraints.
-
-        Example rules:
-        - Check if the vehicle crosses lane markings.
-        - Check for potential collisions with obstacles.
-
-        Adjust and extend this function according to your simulation environment's rules.
-
-        :param desired_steering: The proposed steering angle to be checked.
-        :param current_pose: Current pose of the ego vehicle.
-        :return: A value indicating the level of rule violation (0 for no violation, higher values for more severe violations).
-        """
-
-        # Example: Check for collision with obstacles within a certain safety distance
-        safety_distance = 5.0  # Define a safety distance for collision checking
-
-        # Calculate the position if the vehicle applies the desired steering angle
-        # Here, you would use the desired_steering to calculate the potential new position of the vehicle
-        # For simplicity, let's assume a linear motion along the current orientation with the desired steering
-        new_x = current_pose.position.x + 0.1 * math.cos(current_pose.orientation.z)  # Adjust this calculation based on vehicle dynamics
-        new_y = current_pose.position.y + 0.1 * math.sin(current_pose.orientation.z)  # Adjust this calculation based on vehicle dynamics
-
-        # Check for collision with obstacles at the new position
-        for obstacle in self._obstacles:
-            distance_to_obstacle = distance_vehicle(obstacle.ros_transform.position, [new_x, new_y, current_pose.position.z])
-            if distance_to_obstacle < safety_distance:
-                return 10  # Return a higher value indicating severe violation (adjust based on severity)
-
-        # Example: Check if the vehicle crosses lane markings (assuming a simple simulation)
-        # You would typically use more sophisticated logic based on map data, sensors, or simulation API
-        if new_x < 0 or new_x > 100 or new_y < 0 or new_y > 100:
-            return 5  # Return a value indicating violation (adjust based on severity)
-
-        # If no rule violations are detected
-        return 0  # No rule violation
-
