@@ -38,9 +38,9 @@ class VehiclePIDController(object):  # pylint: disable=too-few-public-methods
                              K_I -- Integral term
         """
         if not args_lateral:
-            args_lateral = {'K_P': 1.0, 'K_D': 0.0, 'K_I': 0.0}
+            args_lateral = {'K_P': 1.95, 'K_D': 0.2, 'K_I': 0.05}
         if not args_longitudinal:
-            args_longitudinal = {'K_P': 1.0, 'K_D': 0.0, 'K_I': 0.0}
+            args_longitudinal = {'K_P': 1.0, 'K_D': 0.0, 'K_I': 0.05}
 
         self._lon_controller = PIDLongitudinalController(**args_longitudinal)
         self._lat_controller = PIDLateralController(**args_lateral)

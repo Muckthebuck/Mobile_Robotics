@@ -24,6 +24,8 @@ from vehicle_pid_controller import VehiclePIDController  # pylint: disable=relat
 from misc import distance_vehicle  # pylint: disable=relative-import
 import carla
 import carla_ros_bridge.transforms as trans
+import shapely.geometry as shape
+from shapely.geometry import LineString
 
 class Obstacle:
     def __init__(self):
@@ -34,6 +36,18 @@ class Obstacle:
         self.ros_transform = None # transform of the obstacle in ROS coordinate
         self.carla_transform = None # transform of the obstacle in Carla world coordinate
         self.bbox = None # Bounding box w.r.t ego vehicle's local frame
+    
+    def get_bbox_center(self, vertices):
+        """
+        Get the center of the bounding box
+        """
+        x = [v.x for v in vertices]
+        y = [v.y for v in vertices]
+        z = [v.z for v in vertices]
+
+        center = Point()
+        center.x, center.y, center.z = np.mean(x), np.mean(y), np.mean(z)
+        return center
 
 class MyLocalPlanner(object):
     """
@@ -153,6 +167,258 @@ class MyLocalPlanner(object):
         return carla_location.x >= min(vx) and carla_location.x <= max(vx) \
                 and carla_location.y >= min(vy) and carla_location.y <= max(vy) \
                 and carla_location.z >= min(vz) and carla_location.z <= max(vz) 
+
+    
+    def check_obstacle_fov(self, pose, fov_angle, fov_radius):
+        """
+        Check whether an obstacle is within the field of view of the ego vehicle
+
+        :param      pose: ego vehicle pose
+        :param      obstacle: an obstacle for collision check
+        :param      fov_angle: field of view angle
+        :param      fov_radius: field of view radius
+        :type       pose: geometry_msgs/Pose
+        :type       obstacle: object Obstacle
+        :type       fov_angle: float or double
+        :type       fov_radius: float or double
+        :return:    true or false
+        :rtype:     boolean
+        """
+        # Helper function to calculate 2D angle between car and a 2D point
+        def calculate_2d_angle(x1, y1, x2, y2):
+            return math.atan2(y2 - y1, x2 - x1)
+
+        point = pose.position
+        # convert the ego vehicle postion to ROS frame
+        carla_location = carla.Location()
+        carla_location.x = point.x
+        carla_location.y = -point.y
+        carla_location.z = point.z
+        
+        # Calculate the cosine of half the FOV angle for comparison
+        cos_half_fov = math.cos(fov_angle / 2.0)
+        quaternion = (
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w
+        )
+        _, _, vehicle_yaw = euler_from_quaternion(quaternion=quaternion)
+        print("vehicle_yaw: {}".format(vehicle_yaw))
+
+        obstacle_angles = []
+        hit = False
+        for ob in self._obstacles:
+            # get the vertices of the bounding box
+            vertices = ob.bbox.get_world_vertices(ob.carla_transform)
+            # Check if the ray hits the obstacle  
+            for v in vertices:
+                angle = calculate_2d_angle(carla_location.x, carla_location.y, v.x, v.y)
+                dot_product = math.cos(angle - vehicle_yaw)
+
+                # check if the obstacle is within the FOV
+                if dot_product >= cos_half_fov:
+                    # set hit to true if the obstacle is in the same lane as the ego vehicle
+                    center = ob.get_bbox_center(vertices)
+                    center.y = -center.y
+                    target_vehicle_waypoint = self.get_waypoint(center)
+                    if target_vehicle_waypoint.road_id == self._current_waypoint.road_id \
+                        and target_vehicle_waypoint.lane_id == self._current_waypoint.lane_id:
+                        hit = True
+                    obstacle_angles.append(math.floor(angle))
+
+        # Create a range of angles spanning FOV with step 1 in degrees
+        fov_range_degrees = list(range(int(math.degrees(vehicle_yaw - fov_angle / 2.0)),
+                                    int(math.degrees(vehicle_yaw + fov_angle / 2.0)) + 1, 4))
+
+        # Convert angles outside FOV back to radians and removing the angles which hit the obstacle
+        safe_angles_fov = [math.radians(angle) for angle in fov_range_degrees \
+                              if all(abs(angle - obstacle_angle) > 1 for obstacle_angle in obstacle_angles)]
+        
+        # default lane change is false
+        target_route_point = self._waypoint_buffer[0]
+        # print(target_route_point)
+
+        # obstacle is in the same lane, find the best lane change
+        if hit:
+            print("\x1b[6;30;33m------Obstacle in the same lane------\x1b[0m")
+            ego_vehicle_waypoint = self.get_waypoint(pose.position)
+            left_lane, right_lane = self.get_left_right_lanes_waypoint(pose.position)
+            print("left_lane: {}".format(left_lane))
+            # print("right_lane: {}".format(right_lane))
+            print("ego_vehicle_waypoint: {}".format(ego_vehicle_waypoint))
+            # remove the angles which lead to incorrect lane change
+            safe_lane_changes = ['left', 'right']
+            if len(safe_angles_fov) > 0:
+                for angle in safe_angles_fov:
+                    # find the x,y coordinates of the point on the circle and find the corresponding waypoint
+                    x = fov_radius * math.cos(angle) + carla_location.x
+                    y = fov_radius * math.sin(angle) + carla_location.y
+                    z = carla_location.z
+                    # find the waypoint
+                    end_waypoint = self.get_waypoint(Point(x=x, y=-y, z=z))
+                    print("\x1b[6;30;33m------end_waypoint------\x1b[0m")
+                    print(end_waypoint.pose.position)
+                    
+
+                    # check if the waypoint is on the left or right lane
+                    if left_lane is None \
+                        and left_lane.road_id == end_waypoint.road_id  \
+                        and left_lane.lane_id == end_waypoint.lane_id:
+                        # the way point is on the left lane but there is no allowed left lane change
+                        safe_angles_fov.remove(angle)
+                        safe_lane_changes.remove('left')
+
+                    elif right_lane is None \
+                        and right_lane.road_id == end_waypoint.road_id \
+                        and right_lane.lane_id == end_waypoint.lane_id:
+                        # if the waypoint is on the right lane but there is no allowed right lane change
+                        safe_angles_fov.remove(angle)
+                        safe_lane_changes.remove('right')
+
+                    # if the waypoint is not on the left or right lane or current lane, remove the angle
+                    elif ego_vehicle_waypoint.road_id != end_waypoint.road_id \
+                        and ego_vehicle_waypoint.lane_id != end_waypoint.lane_id:
+                        safe_angles_fov.remove(angle)
+            else:
+                safe_lane_changes = []
+
+            # now find the next waypoints of safe lane changes
+            if len(safe_lane_changes) > 0:
+                if 'right' in safe_lane_changes:
+                   right_lane. 
+                    waypoints = right_lane.next(fov_radius+4.0)
+                    for waypoint in waypoints:
+                        self._waypoint_buffer.appendleft(waypoint.pose)
+                    target_route_point = waypoints[0].pose
+                   
+                    print("\x1b[6;30;33m------target_rout_points right lane------\x1b[0m")
+                    print(target_route_point)
+                elif 'left' in safe_lane_changes:
+                    waypoints = left_lane.next(fov_radius+4.0)
+                    for waypoint in waypoints:
+                        self._waypoint_buffer.appendleft(waypoint.pose)
+                    target_route_point = waypoints[0].pose
+            
+                
+        
+
+        return target_route_point
+    
+    # def check_obstacle_front(self, pose, lane_width, fov_radius):
+    #     # fov_angle = math.atan2(lane_width/2, fov_radius)
+    #     fov_angle = np.radians(120)
+    #     for ob in self._obstacles:
+    #         hit, angles_outside_fov = self.check_obstacle_fov(pose=pose,obstacle=ob, fov_angle=fov_angle, fov_radius=fov_radius)
+    #         if hit:
+    #             return True, ob
+    #     return False, None
+         
+    # def obstacle_manuever(self, pose, current_speed, lane_width, fov_radius, target_speed):
+    #     # tif there is an obstacle in the front move to the right
+    #     hit, ob =  self.check_obstacle_front(pose, lane_width, fov_radius=10.0)
+    #     # target waypoint
+    #     self.target_route_point = self._waypoint_buffer[0]
+    #     if hit:
+    #         print("\x1b[6;30;33m------Obstacle in the front------\x1b[0m")
+    #         vertices = ob.bbox.get_world_vertices(ob.carla_transform)
+    #         center = ob.get_bbox_center(vertices)
+    #         # coordinates of the left and right lane markings where the vehicle need to move
+    #         right_future, left_future = self.get_coordinate_lanemarking(center)
+    #         right_current, left_current = self.get_coordinate_lanemarking(pose.position)
+    #         # check if both right lane markings are free
+    #         available_right, available_left = True, True
+    #         for ob in self._obstacles:
+    #             if self.check_obstacle(right_future, ob) or self.check_obstacle(right_current, ob):
+    #                 available_right = False
+    #             if self.check_obstacle(left_future, ob) or self.check_obstacle(left_current, ob):
+    #                 available_left = False
+            
+    #         if available_right:
+    #             print("\x1b[6;30;33m------Move to the right------\x1b[0m")
+    #             # append right_future to the top of waypoint_buffer to move to the right
+    #             right_future.y = -right_future.y
+    #             print("right_future: {}".format(right_future))
+    #             next_waypoint = self.get_waypoint(right_future)
+    #             if next_waypoint is not None:
+    #                 print("current waypoint: {}".format(self.target_route_point.position))
+    #                 self.target_route_point = next_waypoint.pose
+    #                 print("next waypoint: {}".format(next_waypoint.pose.position))
+                  
+    #             else:
+    #                 # If there is no right lane, decelerate
+    #                 target_speed = min(target_speed, 20.0)
+
+    #         elif available_left:
+    #             print("move to the left")
+    #             left_future.y = -left_future.y
+    #             # append left_future to the top of waypoint_buffer to move to the left
+    #             next_waypoint = self.get_waypoint(left_future)
+    #             if next_waypoint is not None:
+    #                 self.target_route_point = next_waypoint.pose
+    #             else:
+    #                 # If there is no left lane, decelerate
+    #                 target_speed = min(target_speed, 20.0)
+    #         else:
+    #             print("no lane change")
+    #             # If there is no lane change, decelerate
+    #             target_speed = min(target_speed, 20.0)
+  
+             
+    #     # publish target point
+    #     target_point = PointStamped()
+    #     target_point.header.frame_id = "map"
+    #     target_point.point.x = self.target_route_point.position.x
+    #     target_point.point.y = self.target_route_point.position.y
+    #     target_point.point.z = self.target_route_point.position.z
+    #     self._target_point_publisher.publish(target_point)
+        
+    #     # move using PID controllers
+    #     control = self._vehicle_controller.run_step(
+    #         target_speed, current_speed, pose, self.target_route_point)
+        
+        
+    #     return control
+
+
+    def get_left_right_lanes_waypoint(self, position):
+        """
+        Helper to get adjacent waypoint 2D coordinates of the left and right lanes. 
+        with respect to the closest waypoint
+        
+        :param      position: queried position
+        :type       position: geometry_msgs/Point
+        :return:    left and right waypoint in numpy array
+        :rtype:     tuple of geometry_msgs/Point (left), geometry_msgs/Point (right)
+        """
+        # get waypoints along road
+        current_waypoint = self.get_waypoint(position)
+        waypoint_xodr = self.map.get_waypoint_xodr(current_waypoint.road_id, current_waypoint.lane_id, current_waypoint.s)
+        
+        # find two orthonormal vectors to the direction of the lane
+        yaw = math.pi - waypoint_xodr.transform.rotation.yaw * math.pi / 180.0
+        v = np.array([1.0, math.tan(yaw)])
+        norm_v = v / np.linalg.norm(v)
+        right_v = np.array([-norm_v[1], norm_v[0]])
+        left_v = np.array([norm_v[1], -norm_v[0]])
+        
+        # find two points that are on the left and right lane markings
+        width = current_waypoint.lane_width 
+        left_waypoint = np.array([current_waypoint.pose.position.x, current_waypoint.pose.position.y]) + width * left_v
+        right_waypoint = np.array([current_waypoint.pose.position.x, current_waypoint.pose.position.y]) + width * right_v
+        ros_left_waypoint = Point()
+        ros_right_waypoint = Point()
+        ros_left_waypoint.x = left_waypoint[0]
+        ros_left_waypoint.y = left_waypoint[1]
+        ros_right_waypoint.x = right_waypoint[0]
+        ros_right_waypoint.y = right_waypoint[1]
+
+        left_lane_waypoint = self.get_waypoint(ros_left_waypoint)
+        right_lane_waypoint = self.get_waypoint(ros_right_waypoint)
+        return left_lane_waypoint, right_lane_waypoint
+
+       
+                
 
     def get_coordinate_lanemarking(self, position):
         """
@@ -280,15 +546,90 @@ class MyLocalPlanner(object):
         # current vehicle waypoint
         self._current_waypoint = self.get_waypoint(current_pose.position)
 
+        # Field of View (FOV) obstacle detection parameters
+        fov_angle = np.radians(120)  # Set the FOV angle (e.g., 180 degrees)
+        fov_radius = 10.0  # Set the FOV radius (e.g., 10 meters)
         # get a list of obstacles surrounding the ego vehicle
-        self.get_obstacles(current_pose.position, 70.0)
+        self.get_obstacles(current_pose.position, fov_radius)
 
-        # # Example 1: get two waypoints on the left and right lane marking w.r.t current pose
-        left, right = self.get_coordinate_lanemarking(current_pose.position)
-        print("\x1b[6;30;33m------Example 1------\x1b[0m")
-        print("Left: {}, {}; right: {}, {}".format(left.x, left.y, right.x, right.y))
+        # # # Example 1: get two waypoints on the left and right lane marking w.r.t current pose
+        # left, right = self.get_coordinate_lanemarking(current_pose.position)
+        # print("\x1b[6;30;33m------Example 1------\x1b[0m")
+        # print("Left: {}, {}; right: {}, {}".format(left.x, left.y, right.x, right.y))
+
+        # # find if there are obstacles in current lane
+        # left_lane, right_lane = self.get_coordinate_lanemarking(current_pose.position)
+        # # left_obstacle = False
+        # # right_obstacle = False
+        # # current_lane_obstacle = False
+
+        # # for ob in self._obstacles:
+        # #     # Check for obstacles in the left lane
+        # #     if self.check_obstacle(left_lane, ob):
+        # #         left_obstacle = True
+        # #     # Check for obstacles in the right lane
+        # #     if self.check_obstacle(right_lane, ob):
+        # #         right_obstacle = True
+      
+
+        # if current_lane_obstacle:
+        #     print("-- no lane change --")
+        #     # If there is an obstacle in the current lane, check for the left and right lanes
+        #     if left_obstacle and right_obstacle:
+        #         # If there are obstacles in both lanes, stop the vehicle
+        #          target_speed = min(target_speed, 50.0)  # Adjust the minimum speed as needed
+        #     elif left_obstacle:
+        #         # If there is an obstacle in the left lane, switch to the right lane
+        #         # find the next waypoint in the right lane
+        #         next_waypoint = self._current_waypoint.get_right_lane()
+        #         if next_waypoint is not None:
+        #             self._waypoints_queue.appendleft(next_waypoint.pose)
+        #             self._waypoint_buffer.appendleft(next_waypoint.pose)
+        #         else:
+        #             # If there is no right lane, decelerate
+        #             target_speed = min(target_speed, 50.0)  # Adjust the minimum speed as needed                    
+        #     elif right_obstacle:
+        #         # If there is an obstacle in the right lane, switch to the left lane
+        #         # find the next waypoint in the left lane
+        #         next_waypoint = self._current_waypoint.get_left_lane()
+        #         if next_waypoint is not None:
+        #             self._waypoints_queue.appendleft(next_waypoint.pose)
+        #             self._waypoint_buffer.appendleft(next_waypoint.pose)
+        #         else:
+        #             # If there is no left lane, decelerate
+        #             target_speed = min(target_speed, 50.0)  # Adjust the minimum speed as needed
         
-        # # Example 2: check obstacle collision
+
+        # Field of View (FOV) obstacle detection
+       
+        # car_fov_obstacle = False
+        # print("\x1b[6;30;33m------Collision Check------\x1b[0m")
+        # for ob in self._obstacles:
+        #     hit, angles_outside_fov = self.check_obstacle_fov(pose=current_pose,obstacle=ob, fov_angle=fov_angle, fov_radius=fov_radius)
+        #     print("id: {}, collision: {}".format(ob.id, hit))
+        #     print("angles_outside_fov: {}".format(angles_outside_fov))
+
+        # 
+        # control = self.obstacle_manuever(pose=current_pose, current_speed=current_speed, lane_width=self._current_waypoint.lane_width, fov_radius=fov_radius, target_speed=target_speed)
+        # # for ob in self._obstacles:
+        #     if self.check_obstacle_fov(current_pose.position, ob, fov_angle, fov_radius):
+        #         car_fov_obstacle = True
+        #         break
+
+        # Calculate safe angles considering obstacles in the FOV
+        # safe_angles = self.get_clear_angles(current_pose=current_pose, fov_angle=fov_angle)
+        # print("\xlib[6;30;33m------Safe Angles------\x1b[0m")
+        # print("Safe angles: {}".format(safe_angles))
+        # if car_fov_obstacle:
+        #     clear_angles = self.get_clear_angles(current_pose, fov_angle)
+        #     for start, end in clear_angles:
+        #         if not any(start < angle < end for angle in safe_angles):
+        #             safe_angles.append((start, end))
+        # else:
+        #     safe_angles = self.get_clear_angles(current_pose, fov_angle)
+
+        # print("Safe angles: {}".format(safe_angles))
+        # Example 2: check obstacle collision
         # print("\x1b[6;30;33m------Example 2------\x1b[0m")
         # point = Point()
         # point.x = 100.0
@@ -297,9 +638,10 @@ class MyLocalPlanner(object):
         # for ob in self._obstacles:
         #     print("id: {}, collision: {}".format(ob.id, self.check_obstacle(point, ob)))
         
-        # target waypoint
-        self.target_route_point = self._waypoint_buffer[0]
+        target_rout_point = self.check_obstacle_fov(current_pose, fov_angle, fov_radius)
 
+        self.target_route_point = target_rout_point
+        # publish target point
         target_point = PointStamped()
         target_point.header.frame_id = "map"
         target_point.point.x = self.target_route_point.position.x
@@ -311,7 +653,7 @@ class MyLocalPlanner(object):
         control = self._vehicle_controller.run_step(
             target_speed, current_speed, current_pose, self.target_route_point)
         
-        
+       
         # purge the queue of obsolete waypoints
         max_index = -1
 
