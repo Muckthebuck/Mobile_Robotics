@@ -1,0 +1,102 @@
+FROM nvidia/cudagl:10.2-devel-ubuntu18.04
+
+ARG CARLA_VERSION=0.9.10.1
+ENV NVIDIA_VISIBLE_DEVICES ${NVIDIA_VISIBLE_DEVICES:-all}
+ENV NVIDIA_DRIVER_CAPABILITIES ${NVIDIA_DRIVER_CAPABILITIES:+$NVIDIA_DRIVER_CAPABILITIES,}graphics
+
+# add new sudo user
+ENV USERNAME carla_melodic
+ENV HOME /home/$USERNAME
+RUN useradd -m $USERNAME && \
+        echo "$USERNAME:$USERNAME" | chpasswd && \
+        usermod --shell /bin/bash $USERNAME && \
+        usermod -aG sudo $USERNAME && \
+        mkdir /etc/sudoers.d && \
+        echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/$USERNAME && \
+        chmod 0440 /etc/sudoers.d/$USERNAME && \
+        # Replace 1000 with your user/group id
+        usermod  --uid 1000 $USERNAME && \
+        groupmod --gid 1000 $USERNAME
+
+ENV DEBIAN_FRONTEND noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        sudo \
+        less \
+        emacs \
+        tmux \
+        bash-completion \
+        command-not-found \
+        software-properties-common \
+        xsel \
+        xdg-user-dirs \
+        python-pip \
+        python-protobuf \
+        python-pexpect \
+        pcl-tools \
+        && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# ROS Melodic
+RUN sh -c 'echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list'
+RUN apt-key adv --keyserver 'hkp://keyserver.ubuntu.com:80' --recv-key C1CF6E31E6BADE8868B172B4F42ED6FBAB17C654
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-melodic-desktop-full \
+        python-rosdep \
+        python-rosinstall \
+        python-rosinstall-generator \
+        python-wstool \
+        build-essential \
+        && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# addtional ROS package
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-melodic-derived-object-msgs \
+        ros-melodic-ackermann-msgs \
+        ros-melodic-ainstein-radar-msgs \
+        && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install \
+        simple-pid \
+        numpy \
+        pygame \
+        networkx
+
+RUN rosdep init
+
+USER $USERNAME
+WORKDIR /home/$USERNAME
+RUN rosdep update
+COPY CARLA_${CARLA_VERSION}.tar.gz /home/$USERNAME/
+RUN mkdir CARLA_${CARLA_VERSION} && \
+    tar xfvz CARLA_${CARLA_VERSION}.tar.gz -C CARLA_${CARLA_VERSION} && \
+    rm /home/$USERNAME/CARLA_${CARLA_VERSION}.tar.gz
+COPY AdditionalMaps_${CARLA_VERSION}.tar.gz /home/$USERNAME/
+RUN tar xfvz AdditionalMaps_${CARLA_VERSION}.tar.gz -C /home/$USERNAME/CARLA_${CARLA_VERSION}/ && \
+    rm /home/$USERNAME/AdditionalMaps_${CARLA_VERSION}.tar.gz
+
+RUN echo "export PYTHONPATH=$PYTHONPATH:~/CARLA_${CARLA_VERSION}/PythonAPI/carla/dist/carla-0.9.10-py2.7-linux-x86_64.egg:~/CARLA_${CARLA_VERSION}/PythonAPI/carla" >> ~/.bashrc
+
+SHELL ["/bin/bash", "-c"]
+RUN mkdir -p ~/catkin_ws/src && \
+    source /opt/ros/melodic/setup.bash && \
+    catkin_init_workspace ~/catkin_ws/src && \
+    cd ~/catkin_ws/src && \
+    git clone --recursive https://github.com/carla-simulator/ros-bridge.git -b ${CARLA_VERSION} && \
+    sed -i -e 's/fixed_delta_seconds: 0.05/fixed_delta_seconds: 0.10/' ros-bridge/carla_ros_bridge/config/settings.yaml && \
+    cd ~/catkin_ws && \
+    catkin_make -DCMAKE_BUILD_TYPE=Release && \
+    source ~/catkin_ws/devel/setup.bash
+
+RUN cd /home/$USERNAME && \
+    git clone https://github.com/carla-simulator/scenario_runner.git -b v0.9.10 && \
+    sed -i '/carla/d' scenario_runner/requirements.txt && \
+    sudo pip install -r scenario_runner/requirements.txt
+
+RUN echo "source /opt/ros/melodic/setup.bash" >> ~/.bashrc && \
+    echo "source ~/catkin_ws/devel/setup.bash" >> ~/.bashrc && \
+    echo "export SCENARIO_RUNNER_PATH=/home/$USERNAME/scenario_runner" >> ~/.bashrc
