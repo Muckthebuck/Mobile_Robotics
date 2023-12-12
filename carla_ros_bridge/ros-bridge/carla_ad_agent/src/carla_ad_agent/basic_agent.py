@@ -11,6 +11,7 @@ target destination. This agent respects traffic lights and other vehicles.
 """
 
 import math
+
 import rospy
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Pose
@@ -77,6 +78,7 @@ class BasicAgent(Agent):
         self._current_speed = math.sqrt(odo.twist.twist.linear.x ** 2 +
                                         odo.twist.twist.linear.y ** 2 +
                                         odo.twist.twist.linear.z ** 2) * 3.6
+        
         self._current_pose = odo.pose.pose
         super(BasicAgent, self).odometry_updated(odo)
 
