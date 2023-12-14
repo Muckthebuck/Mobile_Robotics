@@ -56,8 +56,8 @@ class FrenetPath:
 class FrenetPlanner:
     def __init__(self, ego_bbox_extents, 
                  MaxCurvature=1, D_ROAD_W = 1.0, 
-                 MaxAccel=2.0, DT=0.2, MAX_T=5.0, 
-                 MIN_T=4.0, D_T_S=5.0/3.6, N_S_SAMPLE=1):
+                 MaxAccel=9.0, DT=0.2, MAX_T=2.0, MaxSpeed=100.0/3.6,
+                 MIN_T=0.5, D_T_S=4.0/3.6, N_S_SAMPLE=1):
         self.ego_bbox_extents = ego_bbox_extents
         # params
         self.MAX_ACCEL = MaxAccel  # maximum acceleration [m/ss]
@@ -67,14 +67,15 @@ class FrenetPlanner:
         self.DT = DT  # time tick [s]
         self.MAX_T = MAX_T  # max prediction time [m]
         self.MIN_T = MIN_T  # min prediction time [m]
+        self.MAX_SPEED = MaxSpeed # maximum speed [m/s]
         
         self.D_T_S = D_T_S  # target speed sampling length [m/s]
-        self.N_S_SAMPLE = N_S_SAMPLE  # sampling number of target speed
+        self.N_S_SAMPLE = N_S_SAMPLE  # sampling number of target speedk
         
         self.c_d = 0.0 # current lateral position [m]
         self.c_d_d = 0.0 # current lateral speed [m/s]
         self.c_d_dd = 0.0 # current lateral acceleration [m/s]
-        self.c_speed = 0.0 # current speed [m/s]
+        self.c_speed = 1 # current speed [m/s]
         self.c_accel = 0.0 # current acceleration [m/ss]
         self.csp  = None # current course 
         self.s0 = 0.0 # current course position
@@ -128,7 +129,6 @@ class FrenetPlanner:
 
     def calc_global_paths(self, fplist, csp):
         for fp in fplist:
-
             # calc global positions
             for i in range(len(fp.s)):
                 ix, iy = csp.calc_position(fp.s[i])
@@ -148,6 +148,8 @@ class FrenetPlanner:
                 fp.yaw.append(math.atan2(dy, dx))
                 fp.ds.append(math.hypot(dx, dy))
 
+            if len(fp.x) <= 1 or len(fp.yaw) == 0:
+                continue
             fp.yaw.append(fp.yaw[-1])
             fp.ds.append(fp.ds[-1])
 
@@ -160,21 +162,27 @@ class FrenetPlanner:
     def check_paths(self, fplist, ob):
         ok_ind = []
         for i, _ in enumerate(fplist):
-            if any([v > self.MAX_SPEED for v in fplist[i].s_d]):  # Max speed check
-                continue
-            elif any([abs(a) > self.MAX_ACCEL for a in
-                    fplist[i].s_dd]):  # Max accel check
-                continue
-            elif any([abs(c) > self.MAX_CURVATURE for c in
-                    fplist[i].c]):  # Max curvature check
-                continue
-            # collision check
+           
+            # if any([v > self.MAX_SPEED for v in fplist[i].s_d]):  # Max speed check
+            #     continue
+            # elif any([abs(a) > self.MAX_ACCEL for a in
+            #         fplist[i].s_dd]):  # Max accel check
+            #     continue
+            # elif any([abs(c) > self.MAX_CURVATURE for c in
+            #         fplist[i].c]):  # Max curvature check
+            #     print("curvature ")
+            #     continue
+            # print("\x1b[1;31m" + "Frenet path check passed, now check collision" + "\x1b[0m")
+            # # collision check
             # collisions = False
             # for obstacle in ob:
-            #     if obstacle.check_collision(point=fplist[i], ego_bbox_extents=self.ego_bbox_extents):
+            #     if obstacle.check_collision(fp = fplist[i], 
+            #                                 ego_bbox_extents = self.ego_bbox_extents,
+            #                                 dt = self.DT, ego_v = self.c_speed):
             #         collisions = True 
             #         break
             # if collisions:  
+            #     print("collision ")
             #     continue
 
             ok_ind.append(i)
@@ -182,7 +190,7 @@ class FrenetPlanner:
         return [fplist[i] for i in ok_ind]
 
 
-    def frenet_optimal_planning(self, c_speed, ob, target_speed, road_width):
+    def frenet_optimal_planning(self, c_pos, c_speed, ob, target_speed, road_width):
         """
         frenet_optimal_planning
         input
@@ -199,22 +207,32 @@ class FrenetPlanner:
         if target_speed == None:
             self.TARGET_SPEED = 0
         self.TARGET_SPEED = target_speed
-        self.MAX_SPEED = target_speed + 5
+       
         self.MAX_ROAD_WIDTH = road_width
+        # self.s0 = self.csp.calc_s_from_xy(c_pos.x, c_pos.y, self.s0)
 
         
         self.c_accel = (c_speed - self.c_speed)/self.DT
         self.c_speed = c_speed
+        print("\x1b[1;31m" + "Current speed: " + str(self.c_speed) + "\x1b[0m")
+        print("\x1b[1;31m" + "Current acceleration: " + str(self.c_accel) + "\x1b[0m")
+        print("\x1b[1;31m" + "Current lateral position: " + str(self.c_d) + "\x1b[0m")
+        print("\x1b[1;31m" + "Current lateral speed: " + str(self.c_d_d) + "\x1b[0m")
+        print("\x1b[1;31m" + "Current lateral acceleration: " + str(self.c_d_dd) + "\x1b[0m")
+        print("\x1b[1;31m" + "Current course position: " + str(self.s0) + "\x1b[0m")
+        print("\x1b[1;31m" + "Current target speed: " + str(self.TARGET_SPEED) + "\x1b[0m")
+        print("\x1b[1;31m" + "Current road width: " + str(self.MAX_ROAD_WIDTH) + "\x1b[0m")
         fplist = self.calc_frenet_paths(self.c_speed, self.c_accel, s0=self.s0,
                                         c_d = self.c_d, c_d_d=self.c_d_d, c_d_dd = self.c_d_dd)
         if len(fplist) == 0 or len(fplist[0].s) == 0:
             return False, None, None
         print("\x1b[1;31m" + "Frenet paths generated" + "\x1b[0m")
-        print(len(fplist[0].s))
+        print("first: ", len(fplist[0].s))
         fplist = self.calc_global_paths(fplist, self.csp)
-        print(len(fplist))
+        print("second: ", len(fplist[0].s))
+        print(fplist[0].x, fplist[0].y)
         fplist = self.check_paths(fplist, ob)
-        print(len(fplist))
+        print("third: ", len(fplist))
 
         # find minimum cost path
         min_cost = float("inf")
@@ -226,22 +244,39 @@ class FrenetPlanner:
                 min_cost = fp.cf
                 best_path = fp
                 path_exists = True
-                x,y = best_path.x[1], best_path.y[1]
-                self.s0 = best_path.s[1]
-                self.c_d = best_path.d[1]
-                self.c_d_d = best_path.d_d[1]
-                self.c_d_dd = best_path.d_dd[1]
+        if path_exists and len(best_path.x)>=1:
+            x,y = self.set_from_best_path(best_path)
+
+               
 
         return path_exists, x,y, best_path
     
+    def set_from_best_path(self, best_path):
+        i = 1
+        if(len(best_path.x) == 1):
+            i = 0
+        x,y = best_path.x[i], best_path.y[i]
+        self.s0 = best_path.s[i]
+        self.c_d = best_path.d[i]
+        self.c_d_d = best_path.d_d[i]
+        self.c_d_dd = best_path.d_dd[i]
+        return x,y
 
     def generate_target_course(self, waypoint_buffer):
           # target waypoints
         x = []
         y = []
         for i in waypoint_buffer:
+            # dont append waypoints that are too close to waypoints already in buffer
+            if len(x) > 0:
+                if np.hypot(i.position.x - x[-1], i.position.y - y[-1]) <= 0.0001:
+                    continue
+            
             x.append(i.position.x)
             y.append(i.position.y)
+        print('\x1b[1;31m' + "Waypoints" + '\x1b[0m')
+        print(x)
+        print(y)
         csp = cubic_spline_planner.CubicSpline2D(x, y)
         self.csp = csp
         self.s0 = 0.0
@@ -255,7 +290,7 @@ class FrenetPlanner:
             ryaw.append(csp.calc_yaw(i_s))
             rk.append(csp.calc_curvature(i_s))
 
-        return rx, ry, ryaw, rk, csp
+        return s, rx, ry, ryaw, rk, csp
 
 
 # def main():

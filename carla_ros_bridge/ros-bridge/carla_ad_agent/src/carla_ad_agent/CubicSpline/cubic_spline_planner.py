@@ -7,6 +7,7 @@ Author: Atsushi Sakai(@Atsushi_twi)
 import math
 import numpy as np
 import bisect
+import scipy.optimize as optimize
 
 
 class CubicSpline1D:
@@ -264,6 +265,58 @@ class CubicSpline2D:
         y = self.sy.calc_position(s)
 
         return x, y
+    
+    def calc_s_from_xy(self, x, y, s0=0.0):
+        """
+        calc s from x, y
+
+        Parameters
+        ----------
+        x : float
+            x position for given s.
+        y : float
+            y position for given s.
+
+        Returns
+        -------
+        s : float
+            distance from the start point. if `s` is outside the data point's
+            range, return None.
+        """
+
+        # Use BFGS optimization to find s that minimizes the squared distance
+        result = optimize.minimize(self.distance_squared, s0, args=(x, y),
+                                    method='BFGS', options={'maxiter': 100})
+
+        # Extract the optimal s value
+        optimal_s = result.x[0]
+        return optimal_s
+    
+    def distance_squared(self, s, given_x, given_y):
+        """
+        calc distance squared between given point and point on the path at s
+
+        Parameters
+        ----------
+        s : float
+            distance from the start point. if `s` is outside the data point's
+            range, return float('inf').
+        given_x : float
+            x position of given point
+        given_y : float
+            y position of given point
+        
+        Returns
+        -------
+        distance_squared : float
+            distance squared between given point and point on the path at s
+        """
+        # Calculate the x, y coordinates on the path at s
+        path_x, path_y = self.calc_position(s)
+        if path_x == None or path_y == None:
+            return  float('inf')
+        # Calculate squared Euclidean distance
+        return (path_x - given_x)**2 + (path_y - given_y)**2
 
     def calc_curvature(self, s):
         """

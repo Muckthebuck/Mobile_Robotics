@@ -15,8 +15,11 @@ import rospy
 import math
 import numpy as np
 from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import Point
+from geometry_msgs.msg import Quaternion
+from nav_msgs.msg import Path
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
 from carla_waypoint_types.srv import GetWaypoint
 from carla_msgs.msg import CarlaEgoVehicleControl
@@ -48,58 +51,81 @@ class Obstacle:
         center.x, center.y, center.z = np.mean(x), np.mean(y), np.mean(z)
         return center
     
-    def get_ego_bbox_verts(self, extent, carla_location):
+    def get_bbox_radius(self, ego_bbox_extents):
         """
-        Get the vertices of the bounding box w.r.t ego vehicle's local frame
+        Get the radius of the bounding box of the ego vehicle
         """
-        vertices = []
-        vertices.append(carla.Location(x=carla_location.x+extent.x, y=carla_location.y+extent.y, z=carla_location.z+extent.z))
-        vertices.append(carla.Location(x=carla_location.x+extent.x, y=carla_location.y-extent.y, z=carla_location.z+extent.z))
-        vertices.append(carla.Location(x=carla_location.x-extent.x, y=carla_location.y-extent.y, z=carla_location.z+extent.z))
-        vertices.append(carla.Location(x=carla_location.x-extent.x, y=carla_location.y+extent.y, z=carla_location.z+extent.z))
-        vertices.append(carla.Location(x=carla_location.x+extent.x, y=carla_location.y+extent.y, z=carla_location.z-extent.z))
-        vertices.append(carla.Location(x=carla_location.x+extent.x, y=carla_location.y-extent.y, z=carla_location.z-extent.z))
-        vertices.append(carla.Location(x=carla_location.x-extent.x, y=carla_location.y-extent.y, z=carla_location.z-extent.z))
-        vertices.append(carla.Location(x=carla_location.x-extent.x, y=carla_location.y+extent.y, z=carla_location.z-extent.z))
-        return vertices
-        
+        return max(ego_bbox_extents.x, ego_bbox_extents.y)
     
-    def check_collision(self, point, ego_bbox_extents, dt, ego_v):
+    def check_collision(self, fp, ego_bbox_extents, dt, ego_v):
         """
-        Check collision between a point and the extended bounding boxes of the obstacle and ego vehicle incorporating their velocities.
+        Check collision between a path and the extended bounding boxes of the obstacle and ego vehicle incorporating their velocities.
 
-        :param      point: a location to check the collision (in ROS frame)
+        :param      path: a path to check the collision (in ROS frame)
         :param      ego_bbox_extents: ego vehicle's bounding box extents
-        :type       point: geometry_msgs/Point
+        :type       path: list of geometry_msgs/Point
         :type       ego_bbox_extents: carla.Location
         :return:    true or false indicating collision
         :rtype:     boolean   
         """
-        carla_location = carla.Location()
-        carla_location.x = point.x
-        carla_location.y = -point.y
-        carla_location.z = point.z
+        ego_radius = self.get_bbox_radius(ego_bbox_extents)
+        obstacle_radius = self.get_bbox_radius(self.bbox.extent)
         
-        # Get vertices of the obstacle's bounding box and expand it with velocity
-        obstacle_vertices = self.bbox.get_world_vertices(self.carla_transform)
-        expanded_obstacle_vx = [v.x + self.vx * dt for v in obstacle_vertices]
-        expanded_obstacle_vy = [v.y + self.vy * dt for v in obstacle_vertices]
-        
-        # Get the vertices of the ego vehicle's bounding box and expand it with its velocity
-        ego_bbox_vertices = self.get_ego_bbox_verts(ego_bbox_extents, carla_location)
-        expanded_ego_vx = [v.x + ego_bbox_extents.x * dt for v in ego_bbox_vertices]
-        expanded_ego_vy = [v.y + ego_bbox_extents.y * dt for v in ego_bbox_vertices]
+        # get obstacle position from carla transform
+        ob_pos = self.carla_transform.position
+        print("\x1b[6;30;33m------collision check frenetcord------\x1b[0m")
+        print("obstacle position: {}, {}, {}").format(ob_pos.x, ob_pos.y, ob_pos.z)
+        print(fp.x[0], fp.y[0])
 
-        # Check for intersection between the expanded bounding boxes
-        for ego_v_x, ego_v_y in zip(expanded_ego_vx, expanded_ego_vy):
-            for obstacle_v_x, obstacle_v_y in zip(expanded_obstacle_vx, expanded_obstacle_vy):
-                if (ego_v_x >= min(expanded_obstacle_vx) and ego_v_y <= max(expanded_obstacle_vx)
-                        and ego_v_y >= min(expanded_obstacle_vy) and ego_v_y <= max(expanded_obstacle_vy)):
-                    return True
-                if (obstacle_v_x >= min(expanded_ego_vx) and obstacle_v_x <= max(expanded_ego_vx)
-                        and obstacle_v_y >= min(expanded_ego_vy) and obstacle_v_y <= max(expanded_ego_vy)):
-                    return True              
+        d = [((ix - ob_pos.x) ** 2 + (-iy - ob_pos.y) ** 2)
+             for (ix, iy) in zip(fp.x, fp.y)]
+
+        collision = any([di < (ego_radius+obstacle_radius) ** 2 for di in d])
+
+        if collision:
+            return True
         return False
+    
+    
+    # def check_collision(self, point, ego_bbox_extents, dt, ego_v):
+    #     """
+    #     Check collision between a point and the extended bounding boxes of the obstacle and ego vehicle incorporating their velocities.
+
+    #     :param      point: a location to check the collision (in ROS frame)
+    #     :param      ego_bbox_extents: ego vehicle's bounding box extents
+    #     :type       point: geometry_msgs/Point
+    #     :type       ego_bbox_extents: carla.Location
+    #     :return:    true or false indicating collision
+    #     :rtype:     boolean   
+    #     """
+    #     carla_location = carla.Location()
+    #     carla_location.x = point.x
+    #     carla_location.y = -point.y
+    #     carla_location.z = point.z
+
+    #     ego_radius = self.get_bbox_radius(ego_bbox_extents)
+    #     obstacle_radius = self.get_bbox_radius(self.bbox.extent)
+        
+    #     # Get vertices of the obstacle's bounding box and expand it with velocity
+    #     obstacle_vertices = self.bbox.get_world_vertices(self.carla_transform)
+    #     expanded_obstacle_vx = [v.x + self.vx * dt for v in obstacle_vertices]
+    #     expanded_obstacle_vy = [v.y + self.vy * dt for v in obstacle_vertices]
+        
+    #     # Get the vertices of the ego vehicle's bounding box and expand it with its velocity
+    #     ego_bbox_vertices = self.get_ego_bbox_verts(ego_bbox_extents, carla_location)
+    #     expanded_ego_vx = [v.x + ego_bbox_extents.x * dt for v in ego_bbox_vertices]
+    #     expanded_ego_vy = [v.y + ego_bbox_extents.y * dt for v in ego_bbox_vertices]
+
+    #     # Check for intersection between the expanded bounding boxes
+    #     for ego_v_x, ego_v_y in zip(expanded_ego_vx, expanded_ego_vy):
+    #         for obstacle_v_x, obstacle_v_y in zip(expanded_obstacle_vx, expanded_obstacle_vy):
+    #             if (ego_v_x >= min(expanded_obstacle_vx) and ego_v_y <= max(expanded_obstacle_vx)
+    #                     and ego_v_y >= min(expanded_obstacle_vy) and ego_v_y <= max(expanded_obstacle_vy)):
+    #                 return True
+    #             if (obstacle_v_x >= min(expanded_ego_vx) and obstacle_v_x <= max(expanded_ego_vx)
+    #                     and obstacle_v_y >= min(expanded_ego_vy) and obstacle_v_y <= max(expanded_ego_vy)):
+    #                 return True              
+    #     return False
 
 
 
@@ -139,7 +165,7 @@ class MyLocalPlanner(object):
         self._current_waypoint = None
         self._vehicle_controller = None
         self._waypoints_queue = deque(maxlen=20000)
-        self._buffer_size = 5
+        self._buffer_size = 10
         self._waypoint_buffer = deque(maxlen=self._buffer_size)
         self._vehicle_yaw = None
         self._current_speed = None
@@ -153,7 +179,12 @@ class MyLocalPlanner(object):
         self.map = self.world.get_map()        
 
         self._target_point_publisher = rospy.Publisher(
-            "/next_target", PointStamped, queue_size=100)
+            "/next_target", PointStamped, queue_size=1)
+        self._local_path_publisher  = rospy.Publisher(
+            '/carla/{}/local_waypoints'.format(self.role_name), Path, queue_size=1, latch=True)
+        # self._all_local_path_publisher  = rospy.Publisher(
+        #     '/carla/{}/local_waypoints'.format(self.role_name), Path, queue_size=1, latch=True)
+        
         
         rospy.wait_for_service('/carla_waypoint_publisher/{}/get_waypoint'.format(role_name))
         self._get_waypoint_client = rospy.ServiceProxy(
@@ -335,6 +366,7 @@ class MyLocalPlanner(object):
         self._waypoints_queue.clear()
         for elem in current_plan:
             self._waypoints_queue.append(elem.pose)
+        self._frennet_planner.generate_target_course(self._waypoints_queue)
 
     def run_step(self, target_speed, current_speed, current_pose):
         """
@@ -360,7 +392,7 @@ class MyLocalPlanner(object):
                         self._waypoints_queue.popleft())
                 else:
                     break
-            rx, ry, ryaw, rk, csp = self._frennet_planner.generate_target_course(self._waypoint_buffer)
+            # rx, ry, ryaw, rk, csp = self._frennet_planner.generate_target_course(self._waypoint_buffer)
 
         
 
@@ -377,23 +409,30 @@ class MyLocalPlanner(object):
         # print("Left: {}, {}; right: {}, {}".format(left.x, left.y, right.x, right.y))
         
         # Example 2: check obstacle collision
-        print("\x1b[6;30;33m------Example 2------\x1b[0m")
-        point = Point()
-        point.x = 100.0
-        point.y = 100.0
-        point.z = 1.5
-        for ob in self._obstacles:
-            print("id: {}, collision: {}".format(ob.id, self.check_obstacle(point, ob)))
+        print("\x1b[6;30;33m------Current pose------\x1b[0m")
+        print("x: {}, y: {}, z:{}".format(current_pose.position.x, current_pose.position.y, current_pose.position.z))
+        # point = Point()
+        # point.x = 100.0
+        # point.y = 100.0
+        # point.z = 1.5
+        # for ob in self._obstacles:
+        #     print("id: {}, collision: {}".format(ob.id, self.check_obstacle(point, ob)))
         
         # frennet planner
-        path_exists, local_path = self.run_frennet_planner(target_speed, current_speed, lane_width)
+        path_exists, local_path = self.run_frennet_planner(target_speed=target_speed, 
+                                                           current_speed=current_speed, 
+                                                           current_pose=current_pose, 
+                                                           lane_width=lane_width)
         
         # target waypoint
-        self.target_route_point = self._current_pose
+        if current_pose is None:
+            self.target_route_point = self._waypoint_buffer[0]
+        else:
+            self.target_route_point = current_pose
         
         if path_exists:
             self.target_route_point = local_path[0]
-            self.publish_local_path(local_path)
+            self.publish_target_point(local_path)
         else: 
             target_speed = 0.0
          
@@ -417,53 +456,82 @@ class MyLocalPlanner(object):
 
         return control, False
     
-    def publish_local_path(self, local_path):
+    def publish_target_point(self, local_path):
         """
         Publish local path to ROS topic
         """
-        for pose in local_path:
-            point = PointStamped()
-            point.header.frame_id = "map"
-            point.point.x = pose.position.x
-            point.point.y = pose.position.y
-            point.point.z = pose.position.z
-            self._target_point_publisher.publish(point)
+        pose = local_path[0]
+        point = PointStamped()
+        point.header.frame_id = "map"
+        point.point.x = pose.position.x
+        point.point.y = pose.position.y
+        point.point.z = pose.position.z
+        
+        self._target_point_publisher.publish(point)
 
-        pass
     
-    def run_frennet_planner(self, target_speed, current_speed, lane_width):
+    def run_frennet_planner(self, target_speed, current_speed, lane_width, current_pose):
         local_path = []
         # run frennet planner
-        path_exists, x,y, path = self._frennet_planner.frenet_optimal_planning(c_speed= current_speed, ob = self._obstacles,
-                                                                         target_speed= target_speed,  road_width=lane_width)
+        path_exists, x,y, path = self._frennet_planner.frenet_optimal_planning(c_pos=current_pose.position,
+                                                                                       c_speed=current_speed, 
+                                                                                       ob=self._obstacles,
+                                                                                       target_speed=target_speed, 
+                                                                                       road_width=lane_width)
         if path_exists:
             print("\x1b[6;30;33m------Frennet planner path exists------\x1b[0m")
-            local_path = self.frennet_path_to_ros(path, self._current_pose)
+            local_path = self.frennet_path_to_ros(path, current_pose, self._local_path_publisher)
         else:
             print("\x1b[6;30;33m------Frennet planner path does not exist------\x1b[0m")
-
+        # self.publish_all_fp(fplist, current_pose)
         return path_exists, local_path
 
-    def frennet_path_to_ros(self, frennet_path, current_pose):
+    def frennet_path_to_ros(self, frennet_path, current_pose, publisher):
         """
         Convert frennet path to ROS message
         """
         local_path = []
+        msg = Path()
+        msg.header.frame_id = "map"
+        # msg.header.stamp = rospy.Time.now()
         for i in range(len(frennet_path.x)):
             x,y = frennet_path.x[i], frennet_path.y[i]
-            yaw = frennet_path.yaw[i]
-            orientation = quaternion_from_euler(0.0, 0.0, yaw)
-            pose = Pose()
-            pose.position.x = x
-            pose.position.y = y
-            pose.position.z = current_pose.position.z
-            pose.orientation.x = orientation[0]
-            pose.orientation.y = orientation[1]
-            pose.orientation.z = orientation[2]
-            pose.orientation.w = orientation[3]
-            local_path.append(pose)
+            if len(frennet_path.yaw) > 0:   
+                yaw = frennet_path.yaw[i]
+                quat_array = quaternion_from_euler(0.0, 0.0, yaw)
+                orientation = Quaternion()
+                orientation.x = quat_array[0]
+                orientation.y = quat_array[1]
+                orientation.z = quat_array[2]
+                orientation.w = quat_array[3]               
+            else:
+                orientation = current_pose.orientation
             
-        return local_path                           
+            pose = PoseStamped()
+            pose.header.frame_id = "map"
+            # pose.header.stamp = rospy.Time.now()
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.position.z = current_pose.position.z
+            pose.pose.orientation.x = orientation.x
+            pose.pose.orientation.y = orientation.y
+            pose.pose.orientation.z = orientation.z
+            pose.pose.orientation.w = orientation.w
+            local_path.append(pose.pose)
+            msg.poses.append(pose)
+
+        # publisher.publish(msg)
+        # rospy.loginfo("Published {} local waypoints.".format(len(msg.poses)))
+        return local_path     
+
+    # def publish_all_fp(self, fplist, current_pose):
+    #     """
+    #     Publish all frennet planner paths to ROS topic
+    #     """
+    #     for fp in fplist:
+    #         self.frennet_path_to_ros(frennet_path=fp,
+    #                                  current_pose=current_pose, 
+    #                                  publisher=self._all_local_path_publisher)                    
         # get next waypoint from frennet planner
           # initial state
 #     c_speed = 10.0 / 3.6  # current speed [m/s]
