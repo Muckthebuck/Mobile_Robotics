@@ -15,15 +15,10 @@ Ref:
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
 import copy
 import math
-import sys
-import pathlib
-sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
 from Polynomials import QuinticPolynomial, QuarticPolynomial
-from my_local_planner import Obstacle
 from CubicSpline import cubic_spline_planner
 # cost weights
 K_J = 0.1
@@ -32,7 +27,7 @@ K_D = 1.0
 K_LAT = 1.0
 K_LON = 1.0
 
-show_animation = False
+
 
               
 
@@ -81,6 +76,8 @@ class FrenetPlanner:
         self.c_d_dd = 0.0 # current lateral acceleration [m/s]
         self.c_speed = 0.0 # current speed [m/s]
         self.c_accel = 0.0 # current acceleration [m/ss]
+        self.csp  = None # current course 
+        self.s0 = 0.0 # current course position
 
        
             
@@ -160,7 +157,7 @@ class FrenetPlanner:
 
         return fplist
 
-    def check_paths(self, fplist, ob: Obstacle):
+    def check_paths(self, fplist, ob):
         ok_ind = []
         for i, _ in enumerate(fplist):
             if any([v > self.MAX_SPEED for v in fplist[i].s_d]):  # Max speed check
@@ -171,20 +168,24 @@ class FrenetPlanner:
             elif any([abs(c) > self.MAX_CURVATURE for c in
                     fplist[i].c]):  # Max curvature check
                 continue
-            elif not ob.check_collision(point=fplist[i], ego_bbox_extents=self.ego_bbox_extents):  # collision check
-                continue
+            # collision check
+            # collisions = False
+            # for obstacle in ob:
+            #     if obstacle.check_collision(point=fplist[i], ego_bbox_extents=self.ego_bbox_extents):
+            #         collisions = True 
+            #         break
+            # if collisions:  
+            #     continue
 
             ok_ind.append(i)
 
         return [fplist[i] for i in ok_ind]
 
 
-    def frenet_optimal_planning(self, wx, wy , c_speed, ob, target_speed, road_width, s0=0):
+    def frenet_optimal_planning(self, c_speed, ob, target_speed, road_width):
         """
         frenet_optimal_planning
         input
-            wx: waypoints x position list
-            wy: waypoints y position list
             c_speed: current speed [m/s]
             ob: obstacle list
             target_speed: target speed [m/s]
@@ -195,19 +196,25 @@ class FrenetPlanner:
             x: next_x position
             y: next_y position
         """
-
+        if target_speed == None:
+            self.TARGET_SPEED = 0
         self.TARGET_SPEED = target_speed
         self.MAX_SPEED = target_speed + 5
         self.MAX_ROAD_WIDTH = road_width
 
-        tx, ty, tyaw, tc, csp = self.generate_target_course(wx, wy)
         
         self.c_accel = (c_speed - self.c_speed)/self.DT
         self.c_speed = c_speed
-        fplist = self.calc_frenet_paths(self.c_speed, self.c_accel, s0=s0,
+        fplist = self.calc_frenet_paths(self.c_speed, self.c_accel, s0=self.s0,
                                         c_d = self.c_d, c_d_d=self.c_d_d, c_d_dd = self.c_d_dd)
-        fplist = self.calc_global_paths(fplist, csp)
+        if len(fplist) == 0 or len(fplist[0].s) == 0:
+            return False, None, None
+        print("\x1b[1;31m" + "Frenet paths generated" + "\x1b[0m")
+        print(len(fplist[0].s))
+        fplist = self.calc_global_paths(fplist, self.csp)
+        print(len(fplist))
         fplist = self.check_paths(fplist, ob)
+        print(len(fplist))
 
         # find minimum cost path
         min_cost = float("inf")
@@ -220,12 +227,24 @@ class FrenetPlanner:
                 best_path = fp
                 path_exists = True
                 x,y = best_path.x[1], best_path.y[1]
-        
-        return path_exists, x,y
+                self.s0 = best_path.s[1]
+                self.c_d = best_path.d[1]
+                self.c_d_d = best_path.d_d[1]
+                self.c_d_dd = best_path.d_dd[1]
+
+        return path_exists, x,y, best_path
     
 
-    def generate_target_course(self, x, y):
+    def generate_target_course(self, waypoint_buffer):
+          # target waypoints
+        x = []
+        y = []
+        for i in waypoint_buffer:
+            x.append(i.position.x)
+            y.append(i.position.y)
         csp = cubic_spline_planner.CubicSpline2D(x, y)
+        self.csp = csp
+        self.s0 = 0.0
         s = np.arange(0, csp.s[-1], 0.1)
 
         rx, ry, ryaw, rk = [], [], [], []

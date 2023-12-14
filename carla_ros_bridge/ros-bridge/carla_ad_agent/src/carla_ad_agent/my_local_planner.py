@@ -17,14 +17,14 @@ import numpy as np
 from geometry_msgs.msg import PointStamped
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import Point
-from tf.transformations import euler_from_quaternion
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
 from carla_waypoint_types.srv import GetWaypoint
 from carla_msgs.msg import CarlaEgoVehicleControl
 from vehicle_pid_controller import VehiclePIDController  # pylint: disable=relative-import
 from misc import distance_vehicle  # pylint: disable=relative-import
 import carla
 import carla_ros_bridge.transforms as trans
-from frennet_planner import FrenetPlanner, generate_target_course
+from frennet_planner import FrenetPlanner
 
 class Obstacle:
     def __init__(self):
@@ -134,6 +134,7 @@ class MyLocalPlanner(object):
                                          PID controller
                                          {'K_P':, 'K_D':, 'K_I'}
         """
+        self.role_name = role_name
         self.target_route_point = None
         self._current_waypoint = None
         self._vehicle_controller = None
@@ -152,7 +153,7 @@ class MyLocalPlanner(object):
         self.map = self.world.get_map()        
 
         self._target_point_publisher = rospy.Publisher(
-            "/next_target", PointStamped, queue_size=1)
+            "/next_target", PointStamped, queue_size=100)
         
         rospy.wait_for_service('/carla_waypoint_publisher/{}/get_waypoint'.format(role_name))
         self._get_waypoint_client = rospy.ServiceProxy(
@@ -162,11 +163,18 @@ class MyLocalPlanner(object):
         self._init_controller(opt_dict)
 
         # get the ego vehicle's bounding box extents
-        ego_vehicle = self.world.get_actors().find(role_name)
-        self._ego_bbox_extents = ego_vehicle.bounding_box.extent
+        self.get_ego_bbox_extents()
         
         # initialize frennet planner
         self._frennet_planner = FrenetPlanner(ego_bbox_extents=self._ego_bbox_extents)
+
+    def get_ego_bbox_extents(self):
+        actor_list = self.world.get_actors()
+        for actor in actor_list:
+            if "role_name" in actor.attributes:
+                if actor.attributes["role_name"] == self.role_name:
+                    self._ego_bbox_extents = actor.bounding_box.extent
+                    break
 
     def get_obstacles(self, location, range):
         """
@@ -196,6 +204,7 @@ class MyLocalPlanner(object):
                         ob.id = actor.id
                         ob.carla_transform = carla_transform
                         ob.ros_transform = ros_transform
+
                         ob.vx = actor.get_velocity().x
                         ob.vy = actor.get_velocity().y
                         ob.vz = actor.get_velocity().z
@@ -351,6 +360,7 @@ class MyLocalPlanner(object):
                         self._waypoints_queue.popleft())
                 else:
                     break
+            rx, ry, ryaw, rk, csp = self._frennet_planner.generate_target_course(self._waypoint_buffer)
 
         
 
@@ -376,25 +386,17 @@ class MyLocalPlanner(object):
             print("id: {}, collision: {}".format(ob.id, self.check_obstacle(point, ob)))
         
         # frennet planner
-        path_exists, x, y = self.run_frennet_planner(target_speed, current_speed, lane_width)
+        path_exists, local_path = self.run_frennet_planner(target_speed, current_speed, lane_width)
         
         # target waypoint
-        self.target_route_point = self._waypoint_buffer[0]
+        self.target_route_point = self._current_pose
         
-        target_point = PointStamped()
-        target_point.header.frame_id = "map"
-        target_point.point.x = self.target_route_point.position.x
-        target_point.point.y = self.target_route_point.position.y
-        target_point.point.z = self.target_route_point.position.z
-        
-        if not path_exists:
+        if path_exists:
+            self.target_route_point = local_path[0]
+            self.publish_local_path(local_path)
+        else: 
             target_speed = 0.0
-        else:
-            target_point.point.x = x
-            target_point.point.y = y
-    
-        self._target_point_publisher.publish(target_point)
-        
+         
         # move using PID controllers
         control = self._vehicle_controller.run_step(
             target_speed, current_speed, current_pose, self.target_route_point)
@@ -415,22 +417,53 @@ class MyLocalPlanner(object):
 
         return control, False
     
+    def publish_local_path(self, local_path):
+        """
+        Publish local path to ROS topic
+        """
+        for pose in local_path:
+            point = PointStamped()
+            point.header.frame_id = "map"
+            point.point.x = pose.position.x
+            point.point.y = pose.position.y
+            point.point.z = pose.position.z
+            self._target_point_publisher.publish(point)
+
+        pass
+    
     def run_frennet_planner(self, target_speed, current_speed, lane_width):
-        
-        # target waypoints
-        wx = []
-        wy = []
-        for i in self._waypoint_buffer:
-            wx.append(i.position.x)
-            wy.append(i.position.y)
-        
+        local_path = []
         # run frennet planner
-        path_exists, x,y = self._frennet_planner.frenet_optimal_planning(wx= wx, wy=wy, c_speed= current_speed, 
+        path_exists, x,y, path = self._frennet_planner.frenet_optimal_planning(c_speed= current_speed, ob = self._obstacles,
                                                                          target_speed= target_speed,  road_width=lane_width)
         if path_exists:
             print("\x1b[6;30;33m------Frennet planner path exists------\x1b[0m")
+            local_path = self.frennet_path_to_ros(path, self._current_pose)
+        else:
+            print("\x1b[6;30;33m------Frennet planner path does not exist------\x1b[0m")
 
-        return path_exists, x, y                                       
+        return path_exists, local_path
+
+    def frennet_path_to_ros(self, frennet_path, current_pose):
+        """
+        Convert frennet path to ROS message
+        """
+        local_path = []
+        for i in range(len(frennet_path.x)):
+            x,y = frennet_path.x[i], frennet_path.y[i]
+            yaw = frennet_path.yaw[i]
+            orientation = quaternion_from_euler(0.0, 0.0, yaw)
+            pose = Pose()
+            pose.position.x = x
+            pose.position.y = y
+            pose.position.z = current_pose.position.z
+            pose.orientation.x = orientation[0]
+            pose.orientation.y = orientation[1]
+            pose.orientation.z = orientation[2]
+            pose.orientation.w = orientation[3]
+            local_path.append(pose)
+            
+        return local_path                           
         # get next waypoint from frennet planner
           # initial state
 #     c_speed = 10.0 / 3.6  # current speed [m/s]
