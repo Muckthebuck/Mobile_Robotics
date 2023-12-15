@@ -320,7 +320,7 @@ class MyLocalPlanner(object):
                             print(target_route_point)
                     else:
                         # no safe lane change, decelerate
-                        target_speed = min(target_speed, 20.0)
+                        target_speed = 0.0
 
         return target_route_point, target_speed
     

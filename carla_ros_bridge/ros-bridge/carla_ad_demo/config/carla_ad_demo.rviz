@@ -75,29 +75,29 @@ Visualization Manager:
       Topic: /carla/ego_vehicle/waypoints
       Unreliable: false
       Value: true
-    # - Alpha: 1
-    #   Buffer Length: 1
-    #   Class: rviz/Path
-    #   Color: 0; 63; 108
-    #   Enabled: true
-    #   Head Diameter: 0.30000001192092896
-    #   Head Length: 0.20000000298023224
-    #   Length: 0.30000001192092896
-    #   Line Style: Billboards
-    #   Line Width: 0.5
-    #   Name: Local_Paths
-    #   Offset:
-    #     X: 0
-    #     Y: 0
-    #     Z: 0
-    #   Pose Color: 0; 63; 108
-    #   Pose Style: None
-    #   Radius: 0.029999999329447746
-    #   Shaft Diameter: 0.10000000149011612
-    #   Shaft Length: 0.10000000149011612
-    #   Topic: /carla/ego_vehicle/local_waypoints
-    #   Unreliable: false
-    #   Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz/Path
+      Color: 85; 35; 255
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Billboards
+      Line Width: 0.5
+      Name: Local_Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic: /carla/ego_vehicle/local_waypoints
+      Unreliable: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:

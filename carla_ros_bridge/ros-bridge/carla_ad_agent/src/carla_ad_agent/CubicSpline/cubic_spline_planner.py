@@ -266,7 +266,7 @@ class CubicSpline2D:
 
         return x, y
     
-    def calc_s_from_xy(self, x, y, s0=0.0):
+    def calc_sd_from_xy(self, x, y, s0=0.0):
         """
         calc s from x, y
 
@@ -286,11 +286,19 @@ class CubicSpline2D:
 
         # Use BFGS optimization to find s that minimizes the squared distance
         result = optimize.minimize(self.distance_squared, s0, args=(x, y),
-                                    method='BFGS', options={'maxiter': 100})
+                                    method='BFGS', options={'maxiter': 50})
 
         # Extract the optimal s value
         optimal_s = result.x[0]
-        return optimal_s
+        px,py = self.calc_position(optimal_s)
+        # Calculate the vector between the point (x, y) and the path point at s
+        dx = x - px
+        dy = y - py
+
+        # Calculate the lateral distance
+        lateral_position = dx * math.cos(self.calc_yaw(optimal_s)) \
+                         + dy * math.sin(self.calc_yaw(optimal_s))
+        return optimal_s, lateral_position
     
     def distance_squared(self, s, given_x, given_y):
         """

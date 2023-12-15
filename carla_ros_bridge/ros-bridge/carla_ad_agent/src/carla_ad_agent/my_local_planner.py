@@ -57,7 +57,7 @@ class Obstacle:
         """
         return max(ego_bbox_extents.x, ego_bbox_extents.y)
     
-    def check_collision(self, fp, ego_bbox_extents, dt, ego_v):
+    def check_collision(self, fp, ego_bbox_extents, dt, ego_v, lane_width):
         """
         Check collision between a path and the extended bounding boxes of the obstacle and ego vehicle incorporating their velocities.
 
@@ -72,19 +72,34 @@ class Obstacle:
         obstacle_radius = self.get_bbox_radius(self.bbox.extent)
         
         # get obstacle position from carla transform
-        ob_pos = self.carla_transform.position
-        print("\x1b[6;30;33m------collision check frenetcord------\x1b[0m")
-        print("obstacle position: {}, {}, {}").format(ob_pos.x, ob_pos.y, ob_pos.z)
-        print(fp.x[0], fp.y[0])
+        ob_pos = self.ros_transform.position
+        # print("\x1b[6;30;33m------collision check frenetcord------\x1b[0m")
+        # print("obstacle position: {}, {}, {}").format(ob_pos.x, ob_pos.y, ob_pos.z)
+        # print(fp.x[0], fp.y[0])
 
-        d = [((ix - ob_pos.x) ** 2 + (-iy - ob_pos.y) ** 2)
+        d = [((ix - ob_pos.x) ** 2 + (iy - ob_pos.y) ** 2)
              for (ix, iy) in zip(fp.x, fp.y)]
+        
+        # safety_margin = self.calculate_safety_margin(ego_v)
+        safety_margin =lane_width
 
-        collision = any([di < (ego_radius+obstacle_radius) ** 2 for di in d])
+
+        collision = any([di <= (ego_radius+safety_margin) ** 2 for di in d])
 
         if collision:
+            print("\x1b[6;30;33m------collision -----\x1b[0m")
             return True
         return False
+    
+    def calculate_safety_margin(self, ego_v, toc=1.0):
+        """
+        Calculate safety margin based on relative speed and obstacle radius
+        """
+        ob_v = math.sqrt(self.vx**2 + self.vy**2 + self.vz**2)
+        relative_v = abs(ego_v - ob_v)*1/3.6 # convert to m/s
+        # find safety margin based on relative speed, time to crash = 1.0
+        safety_margin = relative_v * toc + self.get_bbox_radius(self.bbox.extent)
+        return safety_margin
     
     
     # def check_collision(self, point, ego_bbox_extents, dt, ego_v):
@@ -165,7 +180,7 @@ class MyLocalPlanner(object):
         self._current_waypoint = None
         self._vehicle_controller = None
         self._waypoints_queue = deque(maxlen=20000)
-        self._buffer_size = 10
+        self._buffer_size = 5
         self._waypoint_buffer = deque(maxlen=self._buffer_size)
         self._vehicle_yaw = None
         self._current_speed = None
@@ -199,6 +214,13 @@ class MyLocalPlanner(object):
         # initialize frennet planner
         self._frennet_planner = FrenetPlanner(ego_bbox_extents=self._ego_bbox_extents)
 
+    def get_ego_accel(self):
+        actor_list = self.world.get_actors()
+        for actor in actor_list:
+            if "role_name" in actor.attributes:
+                if actor.attributes["role_name"] == self.role_name:
+                    return actor.get_acceleration()
+        return None
     def get_ego_bbox_extents(self):
         actor_list = self.world.get_actors()
         for actor in actor_list:
@@ -320,7 +342,7 @@ class MyLocalPlanner(object):
         self._current_speed = math.sqrt(odo.twist.twist.linear.x ** 2 +
                                         odo.twist.twist.linear.y ** 2 +
                                         odo.twist.twist.linear.z ** 2) * 3.6
-
+        
         self._current_pose = odo.pose.pose
         quaternion = (
             odo.pose.pose.orientation.x,
@@ -400,7 +422,9 @@ class MyLocalPlanner(object):
         self._current_waypoint = self.get_waypoint(current_pose.position)
 
         # get a list of obstacles surrounding the ego vehicle
-        self.get_obstacles(current_pose.position, 70.0)
+        toc = 2.5 # time to crash
+        obstacle_sweep_dist = current_speed*toc/3.6 # toc seconds horizon
+        self.get_obstacles(current_pose.position, range=obstacle_sweep_dist)
         lane_width = self._current_waypoint.lane_width
 
         # # Example 1: get two waypoints on the left and right lane marking w.r.t current pose
@@ -418,23 +442,33 @@ class MyLocalPlanner(object):
         # for ob in self._obstacles:
         #     print("id: {}, collision: {}".format(ob.id, self.check_obstacle(point, ob)))
         
+        # check the closest obstacle violating the safety distance
+        switch_to_fernet, closest_obstacle = self.check_closest_obstacle_violates(current_pose, current_speed,toc)
+
+
+        current_accel = self.get_ego_accel()
         # frennet planner
-        path_exists, local_path = self.run_frennet_planner(target_speed=target_speed, 
-                                                           current_speed=current_speed, 
+        if switch_to_fernet:
+            path_exists, local_path = self.run_frennet_planner(target_speed=target_speed/3.6, 
+                                                           current_speed=current_speed/3.6, 
+                                                           current_accel=current_accel,
                                                            current_pose=current_pose, 
                                                            lane_width=lane_width)
         
         # target waypoint
-        if current_pose is None:
-            self.target_route_point = self._waypoint_buffer[0]
-        else:
-            self.target_route_point = current_pose
+        self.target_route_point = self._waypoint_buffer[0]
+       
+
         
-        if path_exists:
-            self.target_route_point = local_path[0]
-            self.publish_target_point(local_path)
-        else: 
+        if switch_to_fernet and path_exists:
+            self.target_route_point = local_path[1]
+            for i in range(2, len(local_path)):
+                self._waypoint_buffer.appendleft(local_path[len(local_path)-i]) 
+            # self.target_route_point.y = -self.target_route_point.y
+        elif switch_to_fernet and not path_exists:
             target_speed = 0.0
+        
+        self.publish_target_point(self.target_route_point)
          
         # move using PID controllers
         control = self._vehicle_controller.run_step(
@@ -456,11 +490,30 @@ class MyLocalPlanner(object):
 
         return control, False
     
-    def publish_target_point(self, local_path):
+    def check_closest_obstacle_violates(self, current_pose, current_speed, toc):
         """
-        Publish local path to ROS topic
+        Get the closest obstacle to the ego vehicle violating the safety distance
         """
-        pose = local_path[0]
+        closest_obstacle = None
+        closest_distance = 100000.0
+        for ob in self._obstacles:
+            distance = math.sqrt((ob.ros_transform.position.x-current_pose.position.x)**2 + (ob.ros_transform.position.y-current_pose.position.y)**2)
+            if distance < closest_distance:
+                closest_distance = distance
+                closest_obstacle = ob
+        
+        if closest_obstacle is not None:
+            safety_margin = closest_obstacle.calculate_safety_margin(current_speed, toc)
+            if closest_distance < safety_margin:
+                print("\x1b[6;30;33m------closest obstacle violates safety distance------\x1b[0m")
+                return True, closest_obstacle
+        return False, closest_obstacle
+
+    
+    def publish_target_point(self, pose):
+        """
+        Publish target ponitto ROS topic
+        """
         point = PointStamped()
         point.header.frame_id = "map"
         point.point.x = pose.position.x
@@ -470,11 +523,14 @@ class MyLocalPlanner(object):
         self._target_point_publisher.publish(point)
 
     
-    def run_frennet_planner(self, target_speed, current_speed, lane_width, current_pose):
+    def run_frennet_planner(self, target_speed, current_speed, current_accel, lane_width, current_pose):
         local_path = []
         # run frennet planner
+        # get current net accel in x,y from currrent_accel
+        c_accel = math.sqrt(current_accel.x**2 + current_accel.y**2)
         path_exists, x,y, path = self._frennet_planner.frenet_optimal_planning(c_pos=current_pose.position,
                                                                                        c_speed=current_speed, 
+                                                                                       c_accel=c_accel,
                                                                                        ob=self._obstacles,
                                                                                        target_speed=target_speed, 
                                                                                        road_width=lane_width)
@@ -493,7 +549,7 @@ class MyLocalPlanner(object):
         local_path = []
         msg = Path()
         msg.header.frame_id = "map"
-        # msg.header.stamp = rospy.Time.now()
+        msg.header.stamp = rospy.Time.now()
         for i in range(len(frennet_path.x)):
             x,y = frennet_path.x[i], frennet_path.y[i]
             if len(frennet_path.yaw) > 0:   
@@ -507,6 +563,16 @@ class MyLocalPlanner(object):
             else:
                 orientation = current_pose.orientation
             
+            pose = Pose()
+            pose.position.x = x
+            pose.position.y = -y
+            pose.position.z = current_pose.position.z
+            pose.orientation.x = orientation.x
+            pose.orientation.y = orientation.y
+            pose.orientation.z = orientation.z
+            pose.orientation.w = orientation.w
+            local_path.append(pose)
+
             pose = PoseStamped()
             pose.header.frame_id = "map"
             # pose.header.stamp = rospy.Time.now()
@@ -517,11 +583,10 @@ class MyLocalPlanner(object):
             pose.pose.orientation.y = orientation.y
             pose.pose.orientation.z = orientation.z
             pose.pose.orientation.w = orientation.w
-            local_path.append(pose.pose)
             msg.poses.append(pose)
 
-        # publisher.publish(msg)
-        # rospy.loginfo("Published {} local waypoints.".format(len(msg.poses)))
+        publisher.publish(msg)
+        rospy.loginfo("Published {} local waypoints.".format(len(msg.poses)))
         return local_path     
 
     # def publish_all_fp(self, fplist, current_pose):
